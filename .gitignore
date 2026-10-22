@@ -1,0 +1,18 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# Dataset
+BSR/
+
+# Generated outputs
+results/
+
+# Downloaded models
+*.pt
+*.pth
+*.onnx
+
+# Editor files
+.vscode/
