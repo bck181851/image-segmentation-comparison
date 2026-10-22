@@ -6,12 +6,21 @@ from pathlib import Path
 from sklearn.cluster import KMeans
 from skimage import segmentation, measure, filters, color
 from ultralytics import FastSAM
+from scipy.io import loadmat
+from scipy.ndimage import distance_transform_edt
+import time
+import psutil
+import os 
+import pandas as pd 
 
 image_dir = Path("BSR/BSDS500/data/images/train")
+gt_dir = Path("BSR/BSDS500/data/groundTruth/train")
 output_dir = Path("results")
 output_dir.mkdir(parents=True, exist_ok=True)
+runtime_results = list()
 
-for path in sorted(image_dir.glob("*.jpg"))[:5]:
+process = psutil.Process(os.getpid())
+for path in sorted(image_dir.glob("*.jpg"))[:30]:
     image = cv2.imread(str(path))
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     H, W, _ = rgb.shape
@@ -30,17 +39,27 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
     axes[0].set_title("Original")
 
     for i, k in enumerate([2, 3, 4, 6, 8]):
+        start_memory = process.memory_info().rss
+        start_time = time.perf_counter()
         km = KMeans(n_clusters=k, n_init=10, random_state=0, init="k-means++")
         km.fit(sample)
+        fit_time = time.perf_counter() - start_time
         labels = km.predict(rgb)
         labels = labels.reshape(H, W)
         regions = measure.label(labels, background=-1, connectivity=1)
         result = np.zeros_like(image)
-
         for region_id in np.unique(regions):
             mask = regions == region_id
             result[mask] = np.mean(image[mask], axis=0)
-
+        total_time = time.perf_counter() - start_time
+        end_memory = process.memory_info().rss 
+        runtime_results.append({
+            "Image": path.name,
+            "Method": f"K-means k={k}",
+            "Fit Time (s)": fit_time,
+            "Runtime (s)": total_time,
+            "RAM Change (MB)": (end_memory - start_memory)/(1024**2)
+        })
         cv2.imwrite(str(save_dir / f"kmeans_k{k}.png"), result)
         np.save(save_dir / f"kmeans_k{k}_labels.npy", labels)
         np.save(save_dir / f"kmeans_k{k}_regions.npy", regions)
@@ -56,11 +75,13 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
 
     fig.savefig(save_dir / "kmeans_comparison.png", dpi=150)
 
-    plt.show()
+    # plt.show()
     plt.close(fig)
 
-for path in sorted(image_dir.glob("*.jpg"))[:5]:
+for path in sorted(image_dir.glob("*.jpg"))[:30]:
     image = cv2.imread(str(path))
+    start_memory = process.memory_info().rss
+    start_time = time.perf_counter()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     H, W = gray.shape
     blur = cv2.GaussianBlur(gray, (5, 5), 1.4)
@@ -74,6 +95,15 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
     seeds[sizes[seeds] < min_area] = 0
     grad = filters.sobel(blur)
     labels = segmentation.watershed(grad, markers=seeds)
+    total_time = time.perf_counter() - start_time 
+    end_memory = process.memory_info().rss
+    runtime_results.append({
+        "Image": path.name, 
+        "Method": "Watershed",
+        "Fit Time (s)" : np.nan, 
+        "Runtime (s)" : total_time,
+        "RAM Change (MB)": (end_memory - start_memory)/(1024**2)
+    })
     result = np.zeros_like(image)
 
     for label_id in np.unique(labels):
@@ -114,16 +144,21 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
 
     fig.savefig(save_dir / "watershed_comparison.png", dpi=150)
 
-    plt.show()
+    # plt.show()
     plt.close(fig)
 
 model = FastSAM("FastSAM-s.pt")
 device = 0 if torch.cuda.is_available() else "cpu"
 
-for path in sorted(image_dir.glob("*.jpg"))[:5]:
+for path in sorted(image_dir.glob("*.jpg"))[:30]:
     image = cv2.imread(str(path))
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     H, W = image.shape[:2]
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    start_memory = process.memory_info().rss
+    start_time = time.perf_counter()
 
     prediction = model(
         image,
@@ -153,6 +188,19 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
 
         for idx in order:
             labels[masks[idx]] = int(idx) + 1
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    total_time = time.perf_counter() - start_time
+    end_memory = process.memory_info().rss
+    runtime_results.append({
+        "Image": path.name,
+        "Method": "FastSAM",
+        "Fit Time (s)": np.nan,
+        "Runtime (s)": total_time,
+        "RAM Change (MB)": (end_memory - start_memory)/(1024**2)
+    })
 
     flat_labels = labels.ravel()
     counts = np.bincount(flat_labels)
@@ -213,5 +261,10 @@ for path in sorted(image_dir.glob("*.jpg"))[:5]:
 
     fig.savefig(save_dir / "fastsam_comparison.png", dpi=150)
 
-    plt.show()
+    #plt.show()
     plt.close(fig)
+
+report_dir = output_dir / "report"
+report_dir.mkdir(parents = True, exist_ok = True)
+df = pd.DataFrame(runtime_results)
+df.to_csv(report_dir / "computational_cost.csv", index = False)
